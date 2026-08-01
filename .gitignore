@@ -1,0 +1,4 @@
+/target
+dockman-gui/node_modules
+dockman-gui/dist
+dockman-gui/src-tauri/target
