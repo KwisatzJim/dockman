@@ -30,7 +30,8 @@ dockman-gui    the only binary — Tauri app, Svelte frontend + Rust backend
 
 - `ssh` on your PATH on the machine running the GUI, with working
   key-based auth to each target (BatchMode is used, so it'll fail fast
-  rather than hang on a password prompt).
+  rather than hang on a password prompt). If not already done so then on each
+  PC run `sudo usermod -aG docker $USER`
 - `docker` and the `compose` plugin (`docker compose`, not the old
   standalone `docker-compose`) on each **remote** host — nothing needs to
   be installed there beyond that.
