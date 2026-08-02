@@ -1,6 +1,6 @@
 use dockman_core::{
-    ActionOutcome, ComposeDir, ComposeService, HostConfig, ImageVersionInfo, StackAction,
-    StackStatus, VersionStatus,
+    ActionOutcome, ComposeDir, ComposeService, HostConfig, ImageVersionInfo, MaintenanceAction,
+    MaintenanceOutcome, StackAction, StackStatus, VersionStatus,
 };
 use serde::Deserialize;
 use tokio::process::Command;
@@ -101,6 +101,28 @@ pub async fn run_action(host: &HostConfig, dir: &ComposeDir, action: StackAction
         Err(e) => ActionOutcome {
             host_id: host.id.clone(),
             dir_id: dir.id.clone(),
+            ok: false,
+            output: e.to_string(),
+        },
+    }
+}
+
+/// Host-wide Docker cleanup (image/container/volume/build-cache/system
+/// prune) — no compose directory involved, this runs directly on the
+/// daemon. No `cd` needed since these commands aren't scoped to a
+/// working directory.
+pub async fn run_maintenance(host: &HostConfig, action: MaintenanceAction) -> MaintenanceOutcome {
+    let remote_cmd = format!("docker {}", action.command());
+    match run_ssh(&host.ssh_alias, &remote_cmd).await {
+        Ok((ok, output)) => MaintenanceOutcome {
+            host_id: host.id.clone(),
+            action,
+            ok,
+            output,
+        },
+        Err(e) => MaintenanceOutcome {
+            host_id: host.id.clone(),
+            action,
             ok: false,
             output: e.to_string(),
         },

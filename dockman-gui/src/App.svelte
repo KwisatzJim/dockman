@@ -20,6 +20,81 @@
   let showAddDir = false;
   let newDir = { path: "", label: "" };
 
+  const MAINTENANCE_ACTIONS = [
+    {
+      value: "prune_images",
+      label: "Prune unused images",
+      desc: "Removes every image not currently backing a container — including images for stopped stacks. Re-running a stopped stack afterward means re-pulling.",
+      dataRisk: false,
+    },
+    {
+      value: "prune_containers",
+      label: "Prune stopped containers",
+      desc: "Removes stopped containers. Low risk — anything still running is untouched, and compose recreates containers from the compose file anyway.",
+      dataRisk: false,
+    },
+    {
+      value: "prune_volumes",
+      label: "Prune unused volumes",
+      desc: "Removes volumes not attached to any container right now. Real data-loss risk if a stack is currently stopped — double check nothing you care about is only stopped, not removed, first.",
+      dataRisk: true,
+    },
+    {
+      value: "prune_build_cache",
+      label: "Prune build cache",
+      desc: "Removes the BuildKit build cache. Safe — only affects build speed next time you build an image.",
+      dataRisk: false,
+    },
+    {
+      value: "prune_system",
+      label: "Prune system",
+      desc: "Combines image + container + network pruning in one call. Does not touch volumes.",
+      dataRisk: false,
+    },
+  ];
+
+  let showMaintenance = false;
+  let maintenanceHostId = null;
+  let confirmPending = {}; // action value -> true while awaiting a second click
+  let maintenanceBusy = null; // action value currently running, or null
+  let maintenanceResults = {}; // hostId -> { action, ok, output }
+
+  function openMaintenance(hostId) {
+    maintenanceHostId = hostId;
+    confirmPending = {};
+    showMaintenance = true;
+  }
+
+  function requestMaintenance(action) {
+    if (!confirmPending[action]) {
+      confirmPending = { ...confirmPending, [action]: true };
+      setTimeout(() => {
+        // auto-reset the confirmation if they don't follow through
+        confirmPending = { ...confirmPending, [action]: false };
+      }, 4000);
+      return;
+    }
+    confirmPending = { ...confirmPending, [action]: false };
+    runMaintenance(action);
+  }
+
+  async function runMaintenance(action) {
+    const hostId = maintenanceHostId;
+    maintenanceBusy = action;
+    statusMessage = `Running ${action} on ${hostId}...`;
+    try {
+      const outcome = await invoke("run_maintenance", { hostId, action });
+      maintenanceResults = { ...maintenanceResults, [hostId]: outcome };
+      statusMessage = outcome.ok
+        ? `${action} finished on ${hostId}.`
+        : `${action} failed on ${hostId}: ${outcome.output}`;
+    } catch (e) {
+      statusMessage = `${action} failed: ${e}`;
+    } finally {
+      maintenanceBusy = null;
+    }
+  }
+
   function key(hostId, dirId) {
     return `${hostId}::${dirId}`;
   }
@@ -251,6 +326,9 @@
               title="Update all stacks on this host"
               on:click={() => runOnHost(host.id, "update")}>&#8635;</button
             >
+            <button class="icon" title="Docker maintenance" on:click={() => openMaintenance(host.id)}
+              >&#129529;</button
+            >
             <button class="icon remove" title="Remove host" on:click={() => removeHost(host.id)}
               >x</button
             >
@@ -426,6 +504,52 @@
       <div class="modal-actions">
         <button on:click={() => (showAddDir = false)}>Cancel</button>
         <button class="primary" on:click={addDir} disabled={!newDir.path}>Add</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if showMaintenance}
+  <div class="modal-backdrop" on:click={() => (showMaintenance = false)}>
+    <div class="modal maintenance-modal" on:click|stopPropagation>
+      <h2>Docker maintenance — {hosts.find((h) => h.id === maintenanceHostId)?.label}</h2>
+      <p class="hint">
+        These act on the whole Docker daemon on this host, not any one stack. Click once to
+        arm, click again within a few seconds to actually run it.
+      </p>
+      <ul class="maintenance-list">
+        {#each MAINTENANCE_ACTIONS as a}
+          <li>
+            <div class="maintenance-row">
+              <div>
+                <div class="maintenance-label">
+                  {a.label}
+                  {#if a.dataRisk}<span class="risk-badge">data risk</span>{/if}
+                </div>
+                <div class="maintenance-desc">{a.desc}</div>
+              </div>
+              <button
+                class={confirmPending[a.value] ? "danger" : ""}
+                disabled={maintenanceBusy === a.value}
+                on:click={() => requestMaintenance(a.value)}
+              >
+                {maintenanceBusy === a.value
+                  ? "Running..."
+                  : confirmPending[a.value]
+                    ? "Click to confirm"
+                    : "Run"}
+              </button>
+            </div>
+          </li>
+        {/each}
+      </ul>
+      {#if maintenanceResults[maintenanceHostId]}
+        {@const r = maintenanceResults[maintenanceHostId]}
+        <p class="hint">Last result ({r.action}, {r.ok ? "ok" : "failed"}):</p>
+        <pre class="maintenance-output">{r.output}</pre>
+      {/if}
+      <div class="modal-actions">
+        <button on:click={() => (showMaintenance = false)}>Close</button>
       </div>
     </div>
   </div>
@@ -762,5 +886,65 @@
     font-size: 12px;
     color: #8b92a1;
     margin: 0;
+  }
+
+  .maintenance-modal {
+    width: 460px;
+  }
+
+  .maintenance-list {
+    list-style: none;
+    padding: 0;
+    margin: 8px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .maintenance-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 8px;
+    border: 1px solid #2a2e36;
+    border-radius: 8px;
+  }
+
+  .maintenance-label {
+    font-weight: 600;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .maintenance-desc {
+    font-size: 11px;
+    color: #8b92a1;
+    margin-top: 2px;
+    max-width: 280px;
+  }
+
+  .risk-badge {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 8px;
+    background: #3d1c1c;
+    color: #e07070;
+    font-weight: normal;
+  }
+
+  .maintenance-output {
+    background: #14161a;
+    border: 1px solid #2a2e36;
+    border-radius: 6px;
+    padding: 8px;
+    font-size: 11px;
+    max-height: 140px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    font-family: ui-monospace, monospace;
+    margin: 4px 0;
   }
 </style>

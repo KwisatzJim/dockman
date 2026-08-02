@@ -110,6 +110,76 @@ pub struct ImageVersionInfo {
     pub latest_digest: Option<String>,
 }
 
+/// Host-wide Docker daemon cleanup — unlike StackAction, these aren't
+/// scoped to one compose directory; they act on everything on that
+/// machine's Docker daemon regardless of which stack it belongs to.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MaintenanceAction {
+    /// Removes every image not currently backing a container — not
+    /// just dangling/untagged ones. Includes images for *stopped*
+    /// stacks; running that again means re-pulling before you can
+    /// start them.
+    PruneImages,
+    /// Removes stopped containers. Low risk — anything still running
+    /// is untouched, and compose recreates containers from the compose
+    /// file anyway.
+    PruneContainers,
+    /// Removes volumes not referenced by any container. Real data-loss
+    /// risk if a stack is stopped and its volume isn't currently
+    /// attached to anything — double check before running this one.
+    PruneVolumes,
+    /// Removes the buildx/BuildKit build cache. Safe — only affects
+    /// build speed next time you build an image, not anything running.
+    PruneBuildCache,
+    /// `docker system prune -a -f`: combines image, container, and
+    /// network pruning in one call. Does NOT touch volumes even with
+    /// -a (Docker requires --volumes explicitly for that), so this is
+    /// PruneImages + PruneContainers roughly, not PruneVolumes.
+    PruneSystem,
+}
+
+impl MaintenanceAction {
+    /// The docker subcommand + args to run, always with -f since these
+    /// run over a non-interactive ssh session — without -f, Docker's
+    /// "are you sure? [y/N]" prompt would just hang forever waiting
+    /// for input that can never arrive.
+    pub fn command(&self) -> &'static str {
+        match self {
+            MaintenanceAction::PruneImages => "image prune -a -f",
+            MaintenanceAction::PruneContainers => "container prune -f",
+            MaintenanceAction::PruneVolumes => "volume prune -f",
+            MaintenanceAction::PruneBuildCache => "builder prune -a -f",
+            MaintenanceAction::PruneSystem => "system prune -a -f",
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            MaintenanceAction::PruneImages => "Prune unused images",
+            MaintenanceAction::PruneContainers => "Prune stopped containers",
+            MaintenanceAction::PruneVolumes => "Prune unused volumes",
+            MaintenanceAction::PruneBuildCache => "Prune build cache",
+            MaintenanceAction::PruneSystem => "Prune system (images + containers + networks)",
+        }
+    }
+
+    /// Whether this action can delete data you might actually want
+    /// back — used by the frontend to show a stronger warning before
+    /// confirming, not just "this will free up disk space."
+    pub fn is_data_risk(&self) -> bool {
+        matches!(self, MaintenanceAction::PruneVolumes)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaintenanceOutcome {
+    pub host_id: String,
+    pub action: MaintenanceAction,
+    pub ok: bool,
+    pub output: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,5 +196,31 @@ mod tests {
     fn status_serializes_snake_case() {
         let s = serde_json::to_string(&VersionStatus::UpdateAvailable).unwrap();
         assert_eq!(s, "\"update_available\"");
+    }
+
+    #[test]
+    fn only_volume_prune_is_flagged_as_data_risk() {
+        for action in [
+            MaintenanceAction::PruneImages,
+            MaintenanceAction::PruneContainers,
+            MaintenanceAction::PruneBuildCache,
+            MaintenanceAction::PruneSystem,
+        ] {
+            assert!(!action.is_data_risk());
+        }
+        assert!(MaintenanceAction::PruneVolumes.is_data_risk());
+    }
+
+    #[test]
+    fn maintenance_commands_always_force_noninteractive() {
+        for action in [
+            MaintenanceAction::PruneImages,
+            MaintenanceAction::PruneContainers,
+            MaintenanceAction::PruneVolumes,
+            MaintenanceAction::PruneBuildCache,
+            MaintenanceAction::PruneSystem,
+        ] {
+            assert!(action.command().contains("-f"));
+        }
     }
 }

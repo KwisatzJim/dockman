@@ -2,7 +2,10 @@ mod ssh_config;
 mod ssh_runner;
 mod state;
 
-use dockman_core::{ActionOutcome, ComposeDir, HostConfig, ImageVersionInfo, StackAction, StackStatus};
+use dockman_core::{
+    ActionOutcome, ComposeDir, HostConfig, ImageVersionInfo, MaintenanceAction, MaintenanceOutcome,
+    StackAction, StackStatus,
+};
 use futures_util::future::join_all;
 use state::HostStore;
 use tauri::State;
@@ -179,6 +182,20 @@ async fn run_action_on_host(
     Ok(join_all(futures).await)
 }
 
+/// Host-wide Docker cleanup (prune images/containers/volumes/build
+/// cache/system) — not scoped to any particular compose stack. The
+/// frontend is responsible for confirming with the user first,
+/// especially for MaintenanceAction::PruneVolumes.
+#[tauri::command]
+async fn run_maintenance(
+    ctx: State<'_, AppContext>,
+    host_id: String,
+    action: MaintenanceAction,
+) -> Result<MaintenanceOutcome, String> {
+    let host = ctx.hosts.get(&host_id).ok_or("unknown host")?;
+    Ok(ssh_runner::run_maintenance(&host, action).await)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt::init();
@@ -202,6 +219,7 @@ pub fn run() {
             run_stack_action,
             run_action_everywhere,
             run_action_on_host,
+            run_maintenance,
         ])
         .run(tauri::generate_context!())
         .expect("error while running dockman");

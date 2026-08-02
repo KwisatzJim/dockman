@@ -98,7 +98,19 @@ else may have drifted too.
    Shows **up to date / update available / unknown** per service;
    "unknown" covers locally-built images with no registry digest,
    missing buildx, private-registry auth issues, etc.
-5. Host/stack config persists to `~/.config/dockman/hosts.json` (or the
+5. **Maintenance** (the broom icon next to each host) runs host-wide
+   Docker cleanup — not scoped to any one stack, since prune commands
+   act on the whole daemon: prune unused images, stopped containers,
+   unused volumes, build cache, or a combined system prune. Each
+   requires clicking twice (arm, then confirm within a few seconds)
+   before it runs, since these delete things. **Prune volumes**
+   specifically carries real data-loss risk if a stack is currently
+   stopped rather than actually gone — its volume won't look
+   "in use" to Docker even though you'd want it back. **Prune images
+   -a** removes anything not backing a currently-running container,
+   including images for stopped stacks — expect a re-pull next time
+   you start one of those.
+6. Host/stack config persists to `~/.config/dockman/hosts.json` (or the
    platform equivalent) — no secrets stored, since auth lives entirely in
    your existing SSH setup.
 
