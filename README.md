@@ -3,6 +3,9 @@
 A Tauri app that manages `docker compose` stacks across every PC on your
 LAN over plain SSH — no agent to install anywhere, no tokens to manage.
 
+<img width="1478" height="832" alt="Screenshot 2026-09-01 at 5 06 19 PM" src="https://github.com/user-attachments/assets/2617c6e4-22c1-4991-a9ad-67fe62275049" />
+
+
 ## How it works
 
 - You already have working SSH access to these machines (that's what the
