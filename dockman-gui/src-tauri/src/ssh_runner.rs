@@ -1,8 +1,9 @@
 use dockman_core::{
-    ActionOutcome, ComposeDir, ComposeService, HostConfig, ImageVersionInfo, MaintenanceAction,
-    MaintenanceOutcome, StackAction, StackStatus, VersionStatus,
+    ActionOutcome, ComposeDir, ComposeService, DiscoveredHost, HostConfig, ImageVersionInfo,
+    MaintenanceAction, MaintenanceOutcome, StackAction, StackStatus, VersionStatus,
 };
 use serde::Deserialize;
+use std::collections::BTreeSet;
 use tokio::process::Command;
 
 /// Run `ssh <alias> "<remote_command>"` and return (success, combined
@@ -46,8 +47,85 @@ pub async fn check_host(alias: &str) -> anyhow::Result<(bool, String)> {
     run_ssh(alias, "echo ok").await
 }
 
+/// Find compose projects already known to Docker. Compose writes the
+/// working directory into a container label, so this avoids an expensive
+/// and potentially invasive filesystem crawl.
+pub async fn discover_compose_dirs(host: &HostConfig) -> anyhow::Result<Vec<ComposeDir>> {
+    let (ok, output) = run_ssh(
+        &host.ssh_alias,
+        "docker ps -a --filter label=com.docker.compose.project.working_dir --format '{{.Label \"com.docker.compose.project.working_dir\"}}'",
+    )
+    .await?;
+    if !ok {
+        anyhow::bail!(if output.is_empty() {
+            "Docker is unavailable on this host".to_string()
+        } else {
+            output
+        });
+    }
+    let paths: BTreeSet<_> = output
+        .lines()
+        .map(str::trim)
+        .filter(|p| p.starts_with('/'))
+        .collect();
+    Ok(paths
+        .into_iter()
+        .map(|path| ComposeDir {
+            id: path.to_string(),
+            path: path.to_string(),
+            label: path.rsplit('/').next().unwrap_or(path).to_string(),
+        })
+        .collect())
+}
+
+/// Probe SSH-config aliases plus machines already visible in the local ARP
+/// table. Only hosts where SSH key auth works and `docker info` succeeds are
+/// returned. No ports are opened and nothing is installed remotely.
+pub async fn discover_docker_hosts(ssh_aliases: Vec<String>) -> Vec<DiscoveredHost> {
+    let mut candidates: BTreeSet<String> = ssh_aliases.into_iter().collect();
+    if let Ok(output) = Command::new("arp").arg("-a").output().await {
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            if let Some(start) = line.find('(') {
+                if let Some(end) = line[start + 1..].find(')') {
+                    candidates.insert(line[start + 1..start + 1 + end].to_string());
+                }
+            }
+        }
+    }
+
+    let probes = candidates.into_iter().map(|alias| async move {
+        let (ok, _) = run_ssh(&alias, "docker info --format '{{.Name}}'")
+            .await
+            .ok()?;
+        if !ok {
+            return None;
+        }
+        let temp = HostConfig {
+            id: alias.clone(),
+            ssh_alias: alias.clone(),
+            label: alias.clone(),
+            compose_dirs: vec![],
+        };
+        let compose_dirs = discover_compose_dirs(&temp).await.unwrap_or_default();
+        Some(DiscoveredHost {
+            ssh_alias: alias.clone(),
+            label: alias,
+            compose_dirs,
+        })
+    });
+    futures_util::future::join_all(probes)
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
 pub async fn fetch_stack_status(host: &HostConfig, dir: &ComposeDir) -> StackStatus {
-    let remote_cmd = format!("{} && docker compose ps --format json", cd_prefix(&dir.path));
+    let remote_cmd = format!(
+        "{} && docker compose ps --format json",
+        cd_prefix(&dir.path)
+    );
     match run_ssh(&host.ssh_alias, &remote_cmd).await {
         Ok((true, output)) => {
             let services = output
@@ -149,6 +227,14 @@ pub async fn check_image_version(host: &HostConfig, image: &str) -> ImageVersion
     // pin itself (checking a pinned digest against itself would be a
     // trivial, useless "match").
     let embedded_digest = parsed.digest.map(str::to_string);
+    if let Some(digest) = embedded_digest {
+        return ImageVersionInfo {
+            image: image.to_string(),
+            status: VersionStatus::PinnedByCompose,
+            running_digest: Some(digest),
+            latest_digest: None,
+        };
+    }
     let registry_ref = match parsed.tag {
         Some(tag) => format!("{}:{}", parsed.repo, tag),
         None => parsed.repo.to_string(),
@@ -161,7 +247,7 @@ pub async fn check_image_version(host: &HostConfig, image: &str) -> ImageVersion
             return ImageVersionInfo {
                 image: image.to_string(),
                 status: VersionStatus::Unknown,
-                running_digest: embedded_digest,
+                running_digest: None,
                 latest_digest: None,
             }
         }
@@ -169,11 +255,11 @@ pub async fn check_image_version(host: &HostConfig, image: &str) -> ImageVersion
 
     let mut parts = output.splitn(2, "---DOCKMAN-SPLIT---");
     let local_json = parts.next().unwrap_or("[]").trim();
-    let remote_hash = parts.next().unwrap_or("").trim();
+    let remote_digest = parts.next().unwrap_or("").trim();
 
-    let running_digest = embedded_digest.or_else(|| extract_matching_digest(local_json, image));
-    let latest_digest = if is_sha256_hex(remote_hash) {
-        Some(format!("sha256:{remote_hash}"))
+    let running_digest = extract_matching_digest(local_json, image);
+    let latest_digest = if is_sha256_digest(remote_digest) {
+        Some(remote_digest.to_string())
     } else {
         None
     };
@@ -258,12 +344,10 @@ fn version_check_script(image: &str, registry_ref: &str) -> String {
     inner.push_str("LOCAL=$(docker image inspect ");
     inner.push_str(&img);
     inner.push_str(" --format \"{{json .RepoDigests}}\" 2>/dev/null || echo \"[]\"); ");
-    inner.push_str("REMOTE_HASH=$(docker buildx imagetools inspect ");
+    inner.push_str("REMOTE_DIGEST=$(docker buildx imagetools inspect ");
     inner.push_str(&reg_ref);
-    inner.push_str(
-        " --raw 2>/dev/null | (sha256sum 2>/dev/null || shasum -a 256) | cut -d\" \" -f1); ",
-    );
-    inner.push_str("printf \"%s\\n---DOCKMAN-SPLIT---\\n%s\\n\" \"$LOCAL\" \"$REMOTE_HASH\"");
+    inner.push_str(" --format \"{{json .Manifest.Digest}}\" 2>/dev/null | tr -d \"\\\"\"); ");
+    inner.push_str("printf \"%s\\n---DOCKMAN-SPLIT---\\n%s\\n\" \"$LOCAL\" \"$REMOTE_DIGEST\"");
 
     // shell_quote wraps `inner` in single quotes; safe here because
     // `inner` (built entirely with double quotes above) never
@@ -320,8 +404,9 @@ fn image_repo(image: &str) -> &str {
     }
 }
 
-fn is_sha256_hex(s: &str) -> bool {
-    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+fn is_sha256_digest(s: &str) -> bool {
+    s.strip_prefix("sha256:")
+        .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 #[cfg(test)]
@@ -404,6 +489,23 @@ mod parse_image_ref_tests {
         assert_eq!(p.repo, "postgres");
         assert_eq!(p.tag, None);
         assert_eq!(p.digest, Some("sha256:aaaa"));
+    }
+
+    #[tokio::test]
+    async fn pinned_image_is_reported_without_contacting_registry() {
+        let host = HostConfig {
+            id: "unreachable-test-host".to_string(),
+            ssh_alias: "unreachable-test-host".to_string(),
+            label: "test".to_string(),
+            compose_dirs: vec![],
+        };
+        let digest = "sha256:fb8d272e529ea567b9bf1302245796f21a2672b8368ca3fcb938ac334e613c8f";
+        let result =
+            check_image_version(&host, &format!("docker.io/valkey/valkey:9@{digest}")).await;
+
+        assert_eq!(result.status, VersionStatus::PinnedByCompose);
+        assert_eq!(result.running_digest.as_deref(), Some(digest));
+        assert_eq!(result.latest_digest, None);
     }
 }
 

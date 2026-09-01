@@ -28,7 +28,12 @@ impl HostStore {
     }
 
     pub fn get(&self, id: &str) -> Option<HostConfig> {
-        self.inner.lock().unwrap().iter().find(|h| h.id == id).cloned()
+        self.inner
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.id == id)
+            .cloned()
     }
 
     pub fn upsert(&self, host: HostConfig) -> Result<()> {

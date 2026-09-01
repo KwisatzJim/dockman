@@ -16,6 +16,10 @@
   let newHost = { ssh_alias: "", label: "" };
   let testResult = null;
   let testing = false;
+  let scanningLan = false;
+  let discoveredHosts = [];
+  let showLanScan = false;
+  let scanningHostId = null;
 
   let showAddDir = false;
   let newDir = { path: "", label: "" };
@@ -104,6 +108,56 @@
   $: selectedStatus = selectedHostId && selectedDirId ? statuses[key(selectedHostId, selectedDirId)] : null;
 
   $: selectedVersions = selectedHostId && selectedDirId ? versionChecks[key(selectedHostId, selectedDirId)] : null;
+  $: allContainers = hosts.flatMap((host) =>
+    host.compose_dirs.flatMap((dir) =>
+      (statuses[key(host.id, dir.id)]?.services ?? []).map((service) => ({ host, dir, service }))
+    )
+  );
+  $: runningCount = allContainers.filter((item) => item.service.state === "running").length;
+  $: updateCount = allContainers.filter((item) => versionChecks[key(item.host.id, item.dir.id)]?.results?.[item.service.image]?.status === "update_available").length;
+
+  async function checkAllVersions() {
+    const stacks = hosts.flatMap((host) => host.compose_dirs.map((dir) => [host.id, dir.id]));
+    statusMessage = `Checking ${stacks.length} stack(s) for updates...`;
+    await Promise.all(stacks.map(([hostId, dirId]) => checkVersions(hostId, dirId)));
+    statusMessage = "Finished checking all container images.";
+  }
+
+  async function scanHost(hostId) {
+    scanningHostId = hostId;
+    statusMessage = "Reading Docker Compose labels on this PC...";
+    try {
+      const found = await invoke("scan_host_containers", { hostId });
+      await refreshHosts();
+      await refreshEverything();
+      statusMessage = `Found ${found.length} Compose stack(s). New stacks were added automatically.`;
+    } catch (e) {
+      statusMessage = `Container scan failed: ${e}`;
+    } finally {
+      scanningHostId = null;
+    }
+  }
+
+  async function scanLan() {
+    showLanScan = true;
+    scanningLan = true;
+    discoveredHosts = [];
+    try {
+      discoveredHosts = await invoke("scan_lan");
+    } catch (e) {
+      statusMessage = `LAN scan failed: ${e}`;
+    } finally {
+      scanningLan = false;
+    }
+  }
+
+  async function addDiscovered(host) {
+    await invoke("add_discovered_host", { host });
+    discoveredHosts = discoveredHosts.filter((item) => item.ssh_alias !== host.ssh_alias);
+    await refreshHosts();
+    await refreshEverything();
+    statusMessage = `Added ${host.label} with ${host.compose_dirs.length} stack(s).`;
+  }
 
   async function checkVersions(hostId, dirId) {
     const k = key(hostId, dirId);
@@ -134,6 +188,10 @@
     if (!selectedHostId && hosts.length > 0) {
       selectedHostId = hosts[0].id;
     }
+  }
+
+  function showDashboard() {
+    selectedDirId = null;
   }
 
   async function refreshEverything() {
@@ -301,9 +359,13 @@
 <main>
   <aside>
     <div class="sidebar-header">
-      <h2>Hosts</h2>
+      <button class="brand" on:click={showDashboard} title="Open dashboard">
+        <span class="brand-mark">D</span><span>Dockman</span>
+      </button>
       <button on:click={openAddHost}>+ Add</button>
     </div>
+
+    <button class="nav-dashboard" class:active={!selectedDirId} on:click={showDashboard}>Overview</button>
 
     <div class="global-actions">
       <button on:click={refreshEverything} disabled={refreshingAll}>
@@ -313,6 +375,11 @@
         Update all
       </button>
     </div>
+    <button class="scan-lan" on:click={scanLan} disabled={scanningLan}>
+      {scanningLan ? "Scanning network..." : "Scan LAN for Docker PCs"}
+    </button>
+
+    <div class="section-label">Managed PCs</div>
 
     <ul class="host-list">
       {#each hosts as host}
@@ -321,6 +388,7 @@
             <span class="host-label" on:click={() => (selectedHostId = host.id)}>
               {host.label}
             </span>
+            <button class="icon" title="Scan this PC for Compose stacks" disabled={scanningHostId === host.id} on:click={() => scanHost(host.id)}>&#128269;</button>
             <button
               class="icon"
               title="Update all stacks on this host"
@@ -359,9 +427,48 @@
     {/if}
 
     {#if !selectedDir}
-      <p class="empty">
-        Select a stack on the left, or add a host / compose directory to get started.
-      </p>
+      <div class="dashboard-header">
+        <div>
+          <p class="eyebrow">Fleet overview</p>
+          <h1>Docker at a glance</h1>
+          <p class="subtitle">Manage every discovered container from one place.</p>
+        </div>
+        <div class="dashboard-actions">
+          <button on:click={refreshEverything} disabled={refreshingAll}>{refreshingAll ? "Refreshing..." : "Refresh status"}</button>
+          <button on:click={checkAllVersions}>Check all for updates</button>
+          <button on:click={() => runEverywhere("restart")}>Restart all</button>
+          <button class="primary" on:click={() => runEverywhere("update")}>Update all</button>
+        </div>
+      </div>
+      <div class="summary-grid">
+        <div class="summary-card"><span>Managed PCs</span><strong>{hosts.length}</strong></div>
+        <div class="summary-card"><span>Containers</span><strong>{allContainers.length}</strong></div>
+        <div class="summary-card healthy"><span>Running</span><strong>{runningCount}</strong></div>
+        <div class="summary-card updates"><span>Updates found</span><strong>{updateCount}</strong></div>
+      </div>
+      <div class="panel">
+        <div class="panel-title"><h2>Containers</h2><span>{allContainers.length} total</span></div>
+        {#if allContainers.length}
+          <table class="container-table">
+            <thead><tr><th>Container</th><th>PC / stack</th><th>Image</th><th>Status</th><th>Update</th><th></th></tr></thead>
+            <tbody>
+              {#each allContainers as item}
+                {@const v = versionChecks[key(item.host.id, item.dir.id)]?.results?.[item.service.image]}
+                <tr>
+                  <td><button class="link-button" on:click={() => selectStack(item.host.id, item.dir.id)}>{item.service.name || item.service.service}</button></td>
+                  <td><div>{item.host.label}</div><span class="mono">{item.dir.label}</span></td>
+                  <td class="mono image-cell">{item.service.image}</td>
+                  <td><span class="badge {item.service.state}">{item.service.state}</span></td>
+                  <td>{#if v}<span class="badge version-{v.status}">{v.status === "update_available" ? "available" : v.status === "up_to_date" ? "current" : v.status === "pinned_by_compose" ? "Pinned by Compose" : "unknown"}</span>{:else}<span class="muted">not checked</span>{/if}</td>
+                  <td class="row-actions"><button on:click={() => runOnStack(item.host.id, item.dir.id, "restart")}>Restart</button><button class="primary" on:click={() => runOnStack(item.host.id, item.dir.id, "update")}>Update</button></td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {:else}
+          <div class="empty-state"><div class="empty-icon">⬡</div><h2>No containers yet</h2><p>Add a PC, then use its scan button to discover running Compose stacks.</p></div>
+        {/if}
+      </div>
     {:else}
       <div class="content-header">
         <div>
@@ -428,6 +535,8 @@
                         ? "up to date"
                         : v.status === "update_available"
                           ? "update available"
+                          : v.status === "pinned_by_compose"
+                            ? "Pinned by Compose"
                           : "unknown"}
                     </span>
                   {:else}
@@ -446,6 +555,27 @@
     {/if}
   </section>
 </main>
+
+{#if showLanScan}
+  <div class="modal-backdrop" on:click={() => (showLanScan = false)}>
+    <div class="modal scan-modal" on:click|stopPropagation>
+      <h2>Docker PCs on your network</h2>
+      <p class="hint">Dockman checks your SSH aliases and nearby PCs already visible to this computer. A PC appears only when SSH key access and Docker both work.</p>
+      {#if scanningLan}
+        <div class="scanning"><span class="spinner"></span>Scanning reachable PCs…</div>
+      {:else if discoveredHosts.length === 0}
+        <div class="empty-state compact"><p>No new Docker PCs were reachable. Make sure SSH key access is configured first.</p></div>
+      {:else}
+        <ul class="discovery-list">
+          {#each discoveredHosts as host}
+            <li><div><strong>{host.label}</strong><span>{host.compose_dirs.length} Compose stack(s) found</span></div><button class="primary" on:click={() => addDiscovered(host)}>Add PC</button></li>
+          {/each}
+        </ul>
+      {/if}
+      <div class="modal-actions"><button on:click={() => (showLanScan = false)}>Close</button></div>
+    </div>
+  </div>
+{/if}
 
 {#if showAddHost}
   <div class="modal-backdrop" on:click={() => (showAddHost = false)}>
@@ -558,9 +688,9 @@
 <style>
   :global(body) {
     margin: 0;
-    font-family: -apple-system, "Segoe UI", sans-serif;
-    background: #14161a;
-    color: #e7e9ec;
+    font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #090d16;
+    color: #eef3fb;
   }
 
   main {
@@ -569,12 +699,13 @@
   }
 
   aside {
-    width: 260px;
-    background: #1b1e24;
-    border-right: 1px solid #2a2e36;
+    width: 278px;
+    box-sizing: border-box;
+    background: linear-gradient(180deg, #111827 0%, #0c1220 100%);
+    border-right: 1px solid #263247;
     display: flex;
     flex-direction: column;
-    padding: 12px;
+    padding: 18px 14px;
     overflow-y: auto;
   }
 
@@ -584,12 +715,38 @@
     align-items: center;
   }
 
-  .sidebar-header h2 {
-    font-size: 14px;
-    text-transform: uppercase;
-    color: #8b92a1;
-    margin: 0;
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    font-size: 18px;
+    font-weight: 750;
   }
+
+  .brand-mark {
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 9px;
+    color: white;
+    background: linear-gradient(135deg, #28b6f6, #6366f1);
+    box-shadow: 0 8px 24px #2563eb55;
+  }
+
+  .nav-dashboard, .scan-lan {
+    width: 100%;
+    margin-top: 16px;
+    text-align: left;
+    padding: 9px 11px;
+  }
+
+  .nav-dashboard.active { background: #2563eb22; border-color: #3b82f680; color: #8ec5ff; }
+  .scan-lan { margin-top: 0; text-align: center; color: #8ec5ff; }
+  .section-label { margin: 20px 8px 8px; color: #68758b; text-transform: uppercase; letter-spacing: .11em; font-size: 10px; font-weight: 700; }
 
   .global-actions {
     display: flex;
@@ -698,8 +855,9 @@
 
   .content {
     flex: 1;
-    padding: 20px 28px;
+    padding: 28px 34px;
     overflow-y: auto;
+    background: radial-gradient(circle at 80% 0%, #17306055 0, transparent 35%), #090d16;
   }
 
   .content-header {
@@ -743,6 +901,34 @@
     margin-top: 16px;
   }
 
+  .dashboard-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; margin: 6px 0 24px; }
+  .dashboard-header h1 { margin: 2px 0 6px; font-size: 30px; letter-spacing: -.035em; }
+  .eyebrow { margin: 0; color: #60a5fa; font-size: 11px; font-weight: 750; text-transform: uppercase; letter-spacing: .13em; }
+  .subtitle { margin: 0; color: #8491a7; }
+  .dashboard-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+  .summary-grid { display: grid; grid-template-columns: repeat(4, minmax(130px, 1fr)); gap: 12px; margin-bottom: 18px; }
+  .summary-card { padding: 17px 18px; border: 1px solid #263247; border-radius: 12px; background: linear-gradient(145deg, #151e2e, #101725); box-shadow: 0 14px 35px #0004; }
+  .summary-card span { color: #8491a7; font-size: 12px; }
+  .summary-card strong { display: block; margin-top: 8px; font-size: 27px; }
+  .summary-card.healthy strong { color: #63d997; }
+  .summary-card.updates strong { color: #f7bd63; }
+  .panel { border: 1px solid #263247; border-radius: 14px; background: #111827dd; overflow: hidden; box-shadow: 0 18px 50px #0005; }
+  .panel-title { display: flex; align-items: baseline; gap: 10px; padding: 18px 20px 2px; }
+  .panel-title h2 { margin: 0; font-size: 17px; }
+  .panel-title span, .muted { color: #718096; font-size: 11px; }
+  .container-table { margin-top: 10px; }
+  .container-table tbody tr:hover { background: #192235; }
+  .image-cell { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .link-button { background: transparent; border: 0; color: #dcecff; font-weight: 650; padding: 0; }
+  .link-button:hover { color: #60a5fa; background: transparent; }
+  .row-actions { text-align: right; white-space: nowrap; }
+  .row-actions button { margin-left: 6px; }
+  .empty-state { text-align: center; padding: 55px 20px; color: #8491a7; }
+  .empty-state h2 { color: #d9e2f0; margin: 8px 0; }
+  .empty-state p { margin: 0 auto; max-width: 440px; }
+  .empty-icon { font-size: 38px; color: #3b82f6; }
+  .empty-state.compact { padding: 25px 15px; }
+
   th,
   td {
     text-align: left;
@@ -784,23 +970,29 @@
     color: #e0b95f;
   }
 
+  .badge.version-pinned_by_compose {
+    background: #25264a;
+    color: #a9a7ff;
+  }
+
   .badge.version-unknown {
     background: #2a2e36;
     color: #8b92a1;
   }
 
   button {
-    background: #23272f;
-    border: 1px solid #2a2e36;
+    background: #1a2435;
+    border: 1px solid #314057;
     color: #e7e9ec;
     padding: 6px 10px;
-    border-radius: 6px;
+    border-radius: 7px;
     cursor: pointer;
     font-size: 12px;
   }
 
   button:hover {
-    background: #2a2e36;
+    background: #243149;
+    border-color: #49617f;
   }
 
   button:disabled {
@@ -813,8 +1005,9 @@
   }
 
   button.primary {
-    background: #2f6feb;
-    border-color: #2f6feb;
+    background: linear-gradient(135deg, #2563eb, #3b82f6);
+    border-color: #4b8df7;
+    box-shadow: 0 5px 16px #2563eb33;
   }
 
   .empty {
@@ -832,9 +1025,9 @@
   }
 
   .modal {
-    background: #1b1e24;
-    border: 1px solid #2a2e36;
-    border-radius: 10px;
+    background: #111827;
+    border: 1px solid #33445e;
+    border-radius: 14px;
     padding: 20px;
     width: 360px;
     display: flex;
@@ -947,4 +1140,14 @@
     font-family: ui-monospace, monospace;
     margin: 4px 0;
   }
+
+  .scan-modal { width: 480px; }
+  .scanning { display: flex; align-items: center; gap: 10px; padding: 28px 4px; color: #9aacbf; }
+  .spinner { width: 15px; height: 15px; border: 2px solid #33445e; border-top-color: #60a5fa; border-radius: 50%; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .discovery-list { list-style: none; padding: 0; margin: 10px 0; }
+  .discovery-list li { display: flex; justify-content: space-between; align-items: center; padding: 12px; border: 1px solid #2c3a51; border-radius: 9px; margin-bottom: 8px; }
+  .discovery-list li div { display: flex; flex-direction: column; gap: 3px; }
+  .discovery-list span { color: #8491a7; font-size: 11px; }
+  @media (max-width: 900px) { .summary-grid { grid-template-columns: repeat(2, 1fr); } .dashboard-header { flex-direction: column; } }
 </style>

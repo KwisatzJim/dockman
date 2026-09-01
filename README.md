@@ -96,7 +96,9 @@ else may have drifted too.
    on. Requires `docker buildx` on that remote host (bundled with
    modern Docker Engine and Docker Desktop — worth confirming on
    CachyOS specifically since Arch packaging sometimes splits it out).
-   Shows **up to date / update available / unknown** per service;
+   Shows **up to date / update available / Pinned by Compose / unknown** per service.
+   Digest-pinned images are labeled as pinned because Compose will keep using
+   that exact image until the compose configuration itself changes;
    "unknown" covers locally-built images with no registry digest,
    missing buildx, private-registry auth issues, etc.
 5. **Maintenance** (the broom icon next to each host) runs host-wide
@@ -131,10 +133,8 @@ else may have drifted too.
   across compose versions (particularly `Ports` vs `Publishers`); the
   parser here handles both but hasn't been tested against your actual
   compose version on either machine.
-- The version check hashes the raw registry manifest on the remote host
-  itself (not locally) specifically to avoid any risk of the digest
-  bytes getting mangled on the way through ssh's text output — but it's
-  still comparing against `docker image inspect`'s `RepoDigests`, which
+- The version check reads the registry's canonical manifest digest on the
+  remote host and compares it with `docker image inspect`'s `RepoDigests`, which
   is only populated once an image has actually been pulled by tag at
   least once. A locally-built image, or one loaded via `docker load`,
   will show as "unknown" rather than a false positive/negative.

@@ -3,8 +3,8 @@ mod ssh_runner;
 mod state;
 
 use dockman_core::{
-    ActionOutcome, ComposeDir, HostConfig, ImageVersionInfo, MaintenanceAction, MaintenanceOutcome,
-    StackAction, StackStatus,
+    ActionOutcome, ComposeDir, DiscoveredHost, HostConfig, ImageVersionInfo, MaintenanceAction,
+    MaintenanceOutcome, StackAction, StackStatus,
 };
 use futures_util::future::join_all;
 use state::HostStore;
@@ -26,17 +26,76 @@ async fn list_ssh_aliases() -> Result<Vec<String>, String> {
 
 #[tauri::command]
 async fn check_host(alias: String) -> Result<(bool, String), String> {
-    ssh_runner::check_host(&alias).await.map_err(|e| e.to_string())
+    ssh_runner::check_host(&alias)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn add_host(ctx: State<'_, AppContext>, ssh_alias: String, label: String) -> Result<(), String> {
+async fn add_host(
+    ctx: State<'_, AppContext>,
+    ssh_alias: String,
+    label: String,
+) -> Result<(), String> {
     ctx.hosts
         .upsert(HostConfig {
             id: ssh_alias.clone(),
             ssh_alias,
             label,
             compose_dirs: Vec::new(),
+        })
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn scan_host_containers(
+    ctx: State<'_, AppContext>,
+    host_id: String,
+) -> Result<Vec<ComposeDir>, String> {
+    let mut host = ctx.hosts.get(&host_id).ok_or("unknown host")?;
+    let found = ssh_runner::discover_compose_dirs(&host)
+        .await
+        .map_err(|e| e.to_string())?;
+    for dir in &found {
+        if !host
+            .compose_dirs
+            .iter()
+            .any(|existing| existing.id == dir.id)
+        {
+            host.compose_dirs.push(dir.clone());
+        }
+    }
+    ctx.hosts.upsert(host).map_err(|e| e.to_string())?;
+    Ok(found)
+}
+
+#[tauri::command]
+async fn scan_lan(ctx: State<'_, AppContext>) -> Result<Vec<DiscoveredHost>, String> {
+    let aliases = ssh_config::list_aliases().map_err(|e| e.to_string())?;
+    let managed: std::collections::HashSet<String> = ctx
+        .hosts
+        .list()
+        .into_iter()
+        .map(|host| host.ssh_alias)
+        .collect();
+    Ok(ssh_runner::discover_docker_hosts(aliases)
+        .await
+        .into_iter()
+        .filter(|host| !managed.contains(&host.ssh_alias))
+        .collect())
+}
+
+#[tauri::command]
+async fn add_discovered_host(
+    ctx: State<'_, AppContext>,
+    host: DiscoveredHost,
+) -> Result<(), String> {
+    ctx.hosts
+        .upsert(HostConfig {
+            id: host.ssh_alias.clone(),
+            ssh_alias: host.ssh_alias,
+            label: host.label,
+            compose_dirs: host.compose_dirs,
         })
         .map_err(|e| e.to_string())
 }
@@ -210,6 +269,9 @@ pub fn run() {
             list_ssh_aliases,
             check_host,
             add_host,
+            scan_host_containers,
+            scan_lan,
+            add_discovered_host,
             remove_host,
             add_compose_dir,
             remove_compose_dir,

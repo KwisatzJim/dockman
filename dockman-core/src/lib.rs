@@ -28,6 +28,13 @@ pub struct ComposeDir {
     pub label: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveredHost {
+    pub ssh_alias: String,
+    pub label: String,
+    pub compose_dirs: Vec<ComposeDir>,
+}
+
 /// One service/container as reported by `docker compose ps --format json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComposeService {
@@ -94,6 +101,10 @@ pub struct ActionOutcome {
 pub enum VersionStatus {
     UpToDate,
     UpdateAvailable,
+    /// The Compose configuration selected an immutable image digest.
+    /// A moving tag may point elsewhere, but `docker compose pull`
+    /// will continue honoring this exact pin until Compose is changed.
+    PinnedByCompose,
     /// Couldn't determine — buildx missing on that host, image built
     /// locally with no registry digest, private registry auth issue,
     /// network hiccup, etc.
@@ -196,6 +207,8 @@ mod tests {
     fn status_serializes_snake_case() {
         let s = serde_json::to_string(&VersionStatus::UpdateAvailable).unwrap();
         assert_eq!(s, "\"update_available\"");
+        let pinned = serde_json::to_string(&VersionStatus::PinnedByCompose).unwrap();
+        assert_eq!(pinned, "\"pinned_by_compose\"");
     }
 
     #[test]
