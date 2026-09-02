@@ -58,6 +58,9 @@ npm run tauri dev
 
 # 4. release bundle (.AppImage/.deb on Linux, .app/.dmg on macOS)
 npm run tauri build
+
+#5. if building on an Arch based system
+NO_STRIP=true npm run tauri build
 ```
 
 If `npm run tauri` itself fails ("command not found" / can't find the
