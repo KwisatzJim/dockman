@@ -1,4 +1,4 @@
-# dockman
+# dockmin
 
 A Tauri app that manages `docker compose` stacks across every PC on your
 LAN over plain SSH — no agent to install anywhere, no tokens to manage.
@@ -9,7 +9,7 @@ LAN over plain SSH — no agent to install anywhere, no tokens to manage.
 ## How it works
 
 - You already have working SSH access to these machines (that's what the
-  `~/.ssh/config` aliases assume — keys, ProxyJump, whatever). dockman
+  `~/.ssh/config` aliases assume — keys, ProxyJump, whatever). dockmin
   reuses that as-is; it doesn't touch your SSH config or manage auth.
 - Each host you add is just an alias from `~/.ssh/config`. Each host has
   one or more compose-stack directories you tell it about (the folder
@@ -25,8 +25,8 @@ LAN over plain SSH — no agent to install anywhere, no tokens to manage.
   JSON, one object per service), parsed and shown per stack.
 
 ```
-dockman-core   shared types only (HostConfig, ComposeDir, StackStatus, ...)
-dockman-gui    the only binary — Tauri app, Svelte frontend + Rust backend
+dockmin-core   shared types only (HostConfig, ComposeDir, StackStatus, ...)
+dockmin-gui    the only binary — Tauri app, Svelte frontend + Rust backend
 ```
 
 ## Requirements
@@ -45,7 +45,7 @@ dockman-gui    the only binary — Tauri app, Svelte frontend + Rust backend
 
 ```bash
 # 1. install JS deps (also pulls in the Tauri CLI as a dev dependency)
-cd dockman-gui
+cd dockmin-gui
 npm install
 
 # 2. sanity-check the Rust side compiles before involving the CLI/webview
@@ -73,7 +73,7 @@ something to embed — `tauri::generate_context!()` hard-requires
 `icons/icon.png` to exist even before you get to the bundle step, which
 is what the "failed to open icon icon.png" error was. Swap in a real
 logo any time with: `npm run tauri icon path/to/a-1024x1024.png` from
-inside `dockman-gui`.
+inside `dockmin-gui`.
 
 If you hit a different error than "can't find src/lib.rs" or a missing
 icon, paste it and I'll take a look — Tauri v2's plugin/config surface
@@ -119,7 +119,7 @@ else may have drifted too.
    -a** removes anything not backing a currently-running container,
    including images for stopped stacks — expect a re-pull next time
    you start one of those.
-6. Host/stack config persists to `~/.config/dockman/hosts.json` (or the
+6. Host/stack config persists to `~/.config/dockmin/hosts.json` (or the
    platform equivalent) — no secrets stored, since auth lives entirely in
    your existing SSH setup.
 
